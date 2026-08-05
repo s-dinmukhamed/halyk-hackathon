@@ -18,12 +18,11 @@ class Settings(BaseSettings):
     embed_model: str = "BAAI/bge-small-en-v1.5"
     top_k: int = 6
 
-    # Reliability under free-tier rate limits
+    # Backoff for free-tier rate limits
     llm_max_retries: int = 5
     llm_backoff_base: float = 2.0
 
-    # Parallelism (finals tie-break is submission time → wall-clock matters).
-    # Modest default so concurrent LLM calls don't trip free-tier rate limits.
+    # Kept modest so concurrent LLM calls don't trip free-tier rate limits.
     max_workers: int = 4
 
 

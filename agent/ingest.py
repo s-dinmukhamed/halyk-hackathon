@@ -1,15 +1,9 @@
-"""Step 1 — INGEST: raw files -> structured, addressable content.
+"""Load raw files into structured, addressable content.
 
-Emits per-document:
-  * page text (with page numbers, so evidence can cite a page)
-  * extracted tables (financial statements live in tables)
-  * lazy page-image renderer for the vision fallback on scans / messy tables
-
-Tabular sidecar files (transaction registry, financials as CSV/XLSX) are loaded
-separately by load_tabular() — much more reliable than reading them out of a PDF.
-
-NOTE: exact filenames / folder layout are unknown until the public dataset drops
-(6 Aug). classify_document() uses filename+content heuristics; revisit then.
+Each PDF becomes a Document with per-page text and tables (so evidence can cite
+a page) plus a lazy page-image renderer for the vision fallback. Transaction
+registries and financials shipped as CSV/XLSX are loaded separately by
+load_tabular — far more reliable than pulling numbers out of a PDF.
 """
 from __future__ import annotations
 
@@ -53,9 +47,9 @@ def parse_pdf(path: Path) -> Document:
 
 
 def render_page_png(path: Path, page_number: int, dpi: int = 150) -> bytes:
-    """Render one page to PNG for the Gemini vision fallback.
+    """Render one page to PNG for the vision fallback.
 
-    Imported lazily so a missing PyMuPDF never breaks the text path.
+    fitz is imported lazily so a missing PyMuPDF never breaks the text path.
     """
     import fitz  # PyMuPDF
 
@@ -66,7 +60,7 @@ def render_page_png(path: Path, page_number: int, dpi: int = 150) -> bytes:
 
 
 def classify_document(filename: str, text: str) -> str:
-    """Heuristic router. TODO(6 Aug): tune against real filenames/headers."""
+    """Route a document by filename and the first page of text."""
     name = filename.lower()
     head = text[:2000].lower()
     if "amendment" in name or "допсоглаш" in name or "дополнительное соглашение" in head:
@@ -81,7 +75,7 @@ def classify_document(filename: str, text: str) -> str:
 
 
 def load_tabular(path: Path):
-    """Load a CSV/XLSX sidecar (transaction registry, financials) into a DataFrame."""
+    """Load a CSV/XLSX sidecar into a DataFrame."""
     import pandas as pd
 
     if path.suffix.lower() in (".xlsx", ".xls"):
@@ -90,11 +84,7 @@ def load_tabular(path: Path):
 
 
 def load_dataset(data_dir: Path) -> tuple[list[Document], list[Path]]:
-    """Discover and parse everything under data_dir.
-
-    Returns (parsed PDFs, tabular sidecar paths). Kept separate so callers can
-    decide how to consume structured tables vs document text.
-    """
+    """Parse every PDF under data_dir and collect the tabular sidecar paths."""
     from .parallel import pmap
 
     data_dir = Path(data_dir)

@@ -1,9 +1,8 @@
-"""Step 6 — EMIT: internal answers -> submission.json in the required template.
+"""Build submission.json from internal answers.
 
-The exact template is unknown until the public dataset drops (6 Aug). We keep
-the mapping isolated here so adapting to the real key names is a one-file change.
-Guiding rule: ALWAYS fill all three components (verdict / value / evidence tx),
-never emit null where the scorer expects a value — partial credit is per-component.
+The field names live here as constants so adapting to the organizers' template
+is a one-place change. Always fill all three components — partial credit is
+per-component, so a null is a guaranteed lost point.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ from pathlib import Path
 
 from .schemas import CovenantAnswer, Verdict
 
-# TODO(6 Aug): replace with the organizers' exact field names from the template.
+# TODO: confirm against the organizers' template once it drops.
 FIELD_VERDICT = "verdict"
 FIELD_VALUE = "value"
 FIELD_EVIDENCE_TX = "evidence_transaction_id"

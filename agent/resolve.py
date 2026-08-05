@@ -1,17 +1,13 @@
-"""Step 3 — RESOLVE: current vs outdated terms.
+"""Pick the covenant version in force, discarding superseded ones.
 
-The core trap of this challenge: an amendment (допсоглашение) can change a
-covenant's threshold. The agent must evaluate against the *latest effective*
-version, not the original loan agreement.
-
-Strategy: group covenants by (borrower_id, covenant_id); within a group, the
-one with the latest effective_date wins; older ones are marked superseded.
-Covenants with no date keep the original agreement's value unless a dated
-amendment overrides them.
+The trap of this challenge: an amendment (допсоглашение) can change a covenant's
+threshold, so we must evaluate against the latest effective version, not the
+original agreement. Covenants are grouped by (borrower, covenant); the latest
+effective_date wins, undated ones sort as original terms.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from .schemas import Covenant
 
@@ -21,7 +17,6 @@ def _parse_date(s: str | None) -> date | None:
         return None
     for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d"):
         try:
-            from datetime import datetime
             return datetime.strptime(s.strip(), fmt).date()
         except (ValueError, AttributeError):
             continue
@@ -43,7 +38,7 @@ def resolve_covenants(covenants: list[Covenant]) -> list[Covenant]:
         if len(group) == 1:
             resolved.append(group[0])
             continue
-        # Latest effective date wins; None dates sort earliest (original terms).
+
         def sort_key(c: Covenant):
             d = _parse_date(c.source.effective_date)
             return (d is not None, d or date.min)

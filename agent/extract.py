@@ -1,13 +1,9 @@
-"""Step 2 — EXTRACT: documents -> structured covenants + financial inputs.
+"""Pull structured covenants and financial inputs out of documents with the LLM.
 
-The LLM's job is *understanding and extraction only* — pull out covenant
-definitions, thresholds, effective dates, and financial line items as JSON.
-It never computes ratios or decides verdicts (that's compute.py).
-
-Every extracted item must carry source evidence (doc + page + snippet) so
-resolve.py can order amendments and verify.py can re-check the citation.
-
-TODO(6 Aug): tune prompts and the metric-name normalization against real docs.
+The model only reads and extracts — thresholds, effective dates, line items — as
+JSON. It never computes ratios or decides verdicts; that's compute.py. Every
+item keeps its source (doc, page, snippet) so resolve.py can order amendments
+and verify.py can re-check the citation.
 """
 from __future__ import annotations
 
@@ -77,23 +73,18 @@ def _as_float(v) -> float | None:
 
 
 def extract_covenants(doc: Document) -> list[Covenant]:
-    """Extract covenants from one loan agreement / amendment document."""
-    covenants: list[Covenant] = []
-    # Chunk by page group to stay within context and keep page evidence precise.
+    """Extract covenants from one loan agreement or amendment."""
     prompt = _EXTRACT_PROMPT.format(name=doc.path.name, text=doc.full_text[:120_000])
     try:
         raw = complete_json(_EXTRACT_SYSTEM, prompt)
     except Exception:
-        return covenants
+        return []
     items = raw if isinstance(raw, list) else raw.get("covenants", [])
-    for item in items:
-        if isinstance(item, dict):
-            covenants.append(_coerce_covenant(item, doc.path.name))
-    return covenants
+    return [_coerce_covenant(i, doc.path.name) for i in items if isinstance(i, dict)]
 
 
 def extract_covenants_vision(doc: Document, pages: list[int]) -> list[Covenant]:
-    """Vision fallback for scanned pages: render pages to PNG and ask Gemini."""
+    """Vision fallback for scanned pages: render to PNG and ask Gemini."""
     from .ingest import render_page_png
 
     images = [render_page_png(doc.path, p) for p in pages]
@@ -104,10 +95,9 @@ def extract_covenants_vision(doc: Document, pages: list[int]) -> list[Covenant]:
 
 
 def extract_financials(docs: list[Document]) -> dict[str, dict]:
-    """Extract financial line items per borrower for ratio computation.
+    """Financial line items per borrower: {borrower_id: {ebitda, total_debt, ...}}.
 
-    Returns {borrower_id: {ebitda, total_debt, current_assets, ...}}.
-    TODO(6 Aug): decide text-vs-table-vs-vision path once statement format is known.
+    Not implemented until we see the statement format; compute.METRICS consumes
+    whatever keys this returns.
     """
-    # Placeholder: real implementation fills inputs consumed by compute.METRICS.
     return {}

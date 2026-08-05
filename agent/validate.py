@@ -1,17 +1,11 @@
-"""Submission validator — fail fast on a malformed submission.json.
+"""Fail fast on a malformed submission.json before uploading it.
 
-On finals day there are ~3 hours and one shot. A submission that parses but has
-the wrong shape (missing components, nulls where the scorer wants a value, a
-verdict label the scorer doesn't recognise) silently loses points. This module
-turns those silent losses into loud errors *before* upload.
+A file that parses but has the wrong shape — missing components, nulls where the
+scorer wants a value, an unrecognised verdict label — loses points silently.
+This turns those into loud errors. Two checks: structural (keys, labels, all
+three components filled) and, when the organizers ship a sample, a key diff
+against their template.
 
-Two independent checks:
-  * structural — required keys present, verdict labels valid, all three scored
-    components filled (partial credit is per-component → never leave one null).
-  * template match — when the organizers ship a sample submission (6 Aug), diff
-    our output's keys against theirs so a renamed field is caught immediately.
-
-Usage:
     python -m agent.validate submission.json
     python -m agent.validate submission.json --template sample_submission.json
 """
@@ -24,8 +18,7 @@ from pathlib import Path
 
 from .emit import FIELD_EVIDENCE_TX, FIELD_VALUE, FIELD_VERDICT, VERDICT_LABELS
 
-# The answers list may sit at the top level or under one of these keys — the
-# organizers' template settles this on 6 Aug; accept the common shapes.
+# The answers list may sit at the top level or under one of these wrapper keys.
 ANSWERS_KEYS = ("answers", "results", "submissions", "data")
 VALID_VERDICTS = {v for v in VERDICT_LABELS.values()}
 

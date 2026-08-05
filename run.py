@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Halyk AI Challenge — autonomous covenant-compliance agent (single entry point).
+"""Covenant-compliance agent — single entry point.
 
     python run.py --data ./data/public --out submission.json
 
-This IS the "own agent" the rules require: one command, no manual steps, it
-reads the dataset and writes submission.json. On finals day the participant runs
-this against the private dataset — answers are generated here, never by hand.
-
-Pipeline: INGEST -> EXTRACT -> RESOLVE -> COMPUTE -> VERIFY -> EMIT.
+One command, no manual steps: read the dataset, write submission.json. The rules
+require answers to come from this agent, so on finals day we just point it at the
+private dataset. Pipeline: ingest -> extract -> resolve -> compute -> verify -> emit.
 """
 from __future__ import annotations
 
@@ -23,9 +21,9 @@ from agent.schemas import CovenantAnswer, CovenantType, Transaction, Verdict
 
 
 def build_transactions(tabular_paths) -> list[Transaction]:
-    """Load transaction registry sidecars into Transaction objects.
+    """Load transaction-registry sidecars into Transaction objects.
 
-    TODO(6 Aug): map real column names once the registry schema is known.
+    TODO: map the real column names once we see the registry schema.
     """
     from agent.ingest import load_tabular
 
@@ -56,13 +54,10 @@ def _num(v):
 def run(data_dir: Path, out_path: Path) -> Path:
     t0 = time.time()
 
-    # 1. INGEST
     docs, tabular = load_dataset(data_dir)
     print(f"[ingest] {len(docs)} PDFs, {len(tabular)} tabular files", file=sys.stderr)
 
-    # 2. EXTRACT — covenants from agreements/amendments; financials; transactions
-    # One LLM call per doc; run them concurrently (order preserved) — this is the
-    # main wall-clock cost, and the finals tie-break is submission time.
+    # One LLM call per doc, run concurrently — the main wall-clock cost.
     covenant_docs = [d for d in docs if d.kind in ("loan_agreement", "amendment", "unknown")]
     covenants = pflatmap(extract.extract_covenants, covenant_docs)
     financials = extract.extract_financials(
@@ -72,11 +67,11 @@ def run(data_dir: Path, out_path: Path) -> Path:
     print(f"[extract] {len(covenants)} covenants, {len(transactions)} transactions",
           file=sys.stderr)
 
-    # 3. RESOLVE — amendments supersede by effective date
+    # Drop covenant versions superseded by a later amendment.
     covenants = [c for c in resolve.resolve_covenants(covenants) if not c.superseded]
     print(f"[resolve] {len(covenants)} effective covenants", file=sys.stderr)
 
-    # 4. COMPUTE — deterministic verdict + number + evidence transaction
+    # Deterministic verdict + number + evidence transaction per covenant.
     answers: list[CovenantAnswer] = []
     for c in covenants:
         if c.type == CovenantType.FINANCIAL:
@@ -98,12 +93,10 @@ def run(data_dir: Path, out_path: Path) -> Path:
                 evidence=c.source,
             ))
 
-    # 5. VERIFY — align verdicts to the arithmetic, surface warnings
     answers, warnings = verify.verify_all(answers)
     for w in warnings:
         print(f"[verify] WARN {w}", file=sys.stderr)
 
-    # 6. EMIT
     out = emit.write_submission(answers, out_path)
     print(f"[done] {len(answers)} answers -> {out} in {time.time() - t0:.1f}s",
           file=sys.stderr)

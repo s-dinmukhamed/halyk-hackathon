@@ -1,14 +1,8 @@
-"""Step 4 — COMPUTE: deterministic evaluation. No LLM arithmetic here.
+"""Deterministic evaluation. All arithmetic happens here, never in the LLM.
 
-The judge weights 'точность вычислений', and LLMs are unreliable at arithmetic,
-so every number is computed in plain Python from LLM-extracted inputs.
-
-Two paths:
-  * financial covenants  -> compute a ratio from financial inputs, compare to threshold
-  * transactional covenants -> scan the registry for the offending transaction (улика)
-
-METRICS is a registry keyed by a normalized metric name. TODO(6 Aug): map the
-dataset's actual metric names/labels onto these keys in extract.py.
+The metric is computed from extracted inputs and compared to the resolved
+threshold; transactional covenants are checked by scanning the registry for the
+offending transaction.
 """
 from __future__ import annotations
 
@@ -17,9 +11,6 @@ from typing import Callable, Optional
 from .schemas import Covenant, Operator, Transaction, Verdict
 
 
-# --------------------------------------------------------------------------- #
-# Financial metric calculators: dict of inputs -> ratio (or None if inputs missing)
-# --------------------------------------------------------------------------- #
 def _safe_div(num: Optional[float], den: Optional[float]) -> Optional[float]:
     if num is None or den is None or den == 0:
         return None
@@ -41,7 +32,6 @@ def _quick_ratio(f: dict) -> Optional[float]:
 
 
 def _dscr(f: dict) -> Optional[float]:
-    # Debt service coverage: cash available / debt service.
     return _safe_div(f.get("cfads") or f.get("ebitda"), f.get("debt_service"))
 
 
@@ -57,6 +47,7 @@ def _net_worth(f: dict) -> Optional[float]:
     return f.get("equity") if f.get("equity") is not None else f.get("net_worth")
 
 
+# metric name (normalized in extract.py) -> calculator
 METRICS: dict[str, Callable[[dict], Optional[float]]] = {
     "debt_to_ebitda": _debt_to_ebitda,
     "current_ratio": _current_ratio,
@@ -70,11 +61,8 @@ METRICS: dict[str, Callable[[dict], Optional[float]]] = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# Verdict logic
-# --------------------------------------------------------------------------- #
 def evaluate_operator(value: float, operator: Operator, threshold: float) -> bool:
-    """True == covenant COMPLIED. The covenant states the *required* condition."""
+    """True when the covenant is COMPLIED (the operator states the required condition)."""
     if operator == Operator.LE:
         return value <= threshold
     if operator == Operator.GE:
@@ -90,11 +78,10 @@ def evaluate_operator(value: float, operator: Operator, threshold: float) -> boo
 
 def evaluate_financial(covenant: Covenant, financials: dict
                        ) -> tuple[Verdict, Optional[float]]:
-    """Compute the actual metric value and compare to the resolved threshold."""
     calc = METRICS.get(covenant.metric)
     value = calc(financials) if calc else None
     if value is None or covenant.threshold is None:
-        # Can't compute — caller falls back to a best-guess verdict (never empty).
+        # Can't compute — return a best guess so no answer is left empty.
         return Verdict.COMPLIED, value
     complied = evaluate_operator(value, covenant.operator, covenant.threshold)
     return (Verdict.COMPLIED if complied else Verdict.BREACHED), round(value, 6)
@@ -102,12 +89,10 @@ def evaluate_financial(covenant: Covenant, financials: dict
 
 def find_offending_transaction(covenant: Covenant, transactions: list[Transaction]
                                ) -> Optional[Transaction]:
-    """Scan the registry for the transaction that breaches a transactional covenant.
+    """Find the transaction that breaches a transactional covenant, if any.
 
-    Generic heuristic: filter by borrower, by covenant metric/type keyword, and
-    (if the covenant carries a threshold) by amount over threshold; return the
-    largest offender. TODO(6 Aug): specialise per covenant category once the
-    registry schema and covenant taxonomy are known.
+    Filter by borrower, by a keyword from the covenant, and by amount over the
+    threshold when one is set; return the largest match.
     """
     keyword = (covenant.metric or covenant.name).lower()
     candidates = [

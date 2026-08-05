@@ -1,13 +1,8 @@
-"""LLM access: Gemini (primary, vision + JSON) with Groq text fallback.
+"""LLM access: Gemini for text + vision, Groq as a text fallback.
 
-Design goals for the finals window (~3h, free-tier rate limits):
-  * `complete_json()` — asks for strict JSON and parses it robustly.
-  * `complete_vision()` — send page images to Gemini for scanned/table-heavy PDFs.
-  * Exponential backoff on 429/5xx, and automatic Gemini->Groq failover so one
-    provider hitting its RPM/RPD limit does not stall the whole run.
-
-We deliberately keep this dependency-light (httpx only) — same approach as the
-ai-support-bot llm.py — so there is nothing version-fragile to break on finals day.
+Strict-JSON and vision helpers, exponential backoff on 429/5xx, and automatic
+Gemini->Groq failover so one provider hitting its rate limit doesn't stall the
+run. Kept to httpx only — nothing version-fragile to break on finals day.
 """
 from __future__ import annotations
 
@@ -29,9 +24,6 @@ class LLMError(RuntimeError):
     pass
 
 
-# --------------------------------------------------------------------------- #
-# Low-level provider calls
-# --------------------------------------------------------------------------- #
 def _gemini(system: str, user: str, images: Optional[list[bytes]] = None,
             json_mode: bool = False) -> str:
     if not settings.gemini_api_key:
@@ -94,9 +86,6 @@ def _groq(system: str, user: str, json_mode: bool = False) -> str:
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-# --------------------------------------------------------------------------- #
-# Public API with retry + failover
-# --------------------------------------------------------------------------- #
 def _with_retry(fn, *args, **kwargs) -> str:
     last: Optional[Exception] = None
     for attempt in range(settings.llm_max_retries):
