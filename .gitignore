@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.pytest_cache/
+
+# Datasets — keep out of git (may be large / provided by organizers)
+data/public/
+data/private/
+*.pdf
+submission.json

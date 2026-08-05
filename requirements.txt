@@ -1,0 +1,18 @@
+# Core
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+httpx==0.28.1
+
+# PDF parsing
+pypdf==5.1.0
+pdfplumber==0.11.4
+PyMuPDF==1.24.14
+
+# Retrieval (local, free)
+fastembed==0.5.1
+numpy==1.26.4
+
+# Tabular data (transaction registry, financials)
+pandas==2.2.3
+openpyxl==3.1.5
