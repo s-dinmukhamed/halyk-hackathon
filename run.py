@@ -18,6 +18,7 @@ from pathlib import Path
 
 from agent import compute, emit, extract, resolve, verify
 from agent.ingest import load_dataset
+from agent.parallel import pflatmap
 from agent.schemas import CovenantAnswer, CovenantType, Transaction, Verdict
 
 
@@ -60,10 +61,10 @@ def run(data_dir: Path, out_path: Path) -> Path:
     print(f"[ingest] {len(docs)} PDFs, {len(tabular)} tabular files", file=sys.stderr)
 
     # 2. EXTRACT — covenants from agreements/amendments; financials; transactions
+    # One LLM call per doc; run them concurrently (order preserved) — this is the
+    # main wall-clock cost, and the finals tie-break is submission time.
     covenant_docs = [d for d in docs if d.kind in ("loan_agreement", "amendment", "unknown")]
-    covenants = []
-    for d in covenant_docs:
-        covenants.extend(extract.extract_covenants(d))
+    covenants = pflatmap(extract.extract_covenants, covenant_docs)
     financials = extract.extract_financials(
         [d for d in docs if d.kind == "financials"]
     )

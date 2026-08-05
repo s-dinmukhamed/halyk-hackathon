@@ -95,8 +95,10 @@ def load_dataset(data_dir: Path) -> tuple[list[Document], list[Path]]:
     Returns (parsed PDFs, tabular sidecar paths). Kept separate so callers can
     decide how to consume structured tables vs document text.
     """
+    from .parallel import pmap
+
     data_dir = Path(data_dir)
-    pdfs = [parse_pdf(p) for p in sorted(data_dir.rglob("*.pdf"))]
+    pdfs = pmap(parse_pdf, sorted(data_dir.rglob("*.pdf")))
     tabular = sorted(
         p for p in data_dir.rglob("*")
         if p.suffix.lower() in (".csv", ".xlsx", ".xls")

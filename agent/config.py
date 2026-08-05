@@ -22,5 +22,9 @@ class Settings(BaseSettings):
     llm_max_retries: int = 5
     llm_backoff_base: float = 2.0
 
+    # Parallelism (finals tie-break is submission time → wall-clock matters).
+    # Modest default so concurrent LLM calls don't trip free-tier rate limits.
+    max_workers: int = 4
+
 
 settings = Settings()
