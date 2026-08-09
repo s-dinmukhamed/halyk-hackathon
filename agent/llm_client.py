@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import re
 import sys
 import threading
@@ -48,7 +49,7 @@ def _gemini(system: str, user: str, images: Optional[list[bytes]] = None,
 
     body: dict = {
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0.1},
+        "generationConfig": {"temperature": 0},
     }
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
@@ -60,31 +61,43 @@ def _gemini(system: str, user: str, images: Optional[list[bytes]] = None,
         if fallback not in models_to_try:
             models_to_try.append(fallback)
 
+    # Retry the SAME (best) model with exponential backoff on rate-limit / server
+    # errors before falling to a weaker model. Dropping to a lite model on the first
+    # 429 was the main source of run-to-run variance and dropped (null) cells.
+    # A couple of quick retries per model rides out a transient 429 without
+    # blowing the time budget when a model is hard-limited (then we fall through).
+    attempts = max(2, min(settings.llm_max_retries, 2))
     last_err = None
     for model in models_to_try:
-        try:
-            resp = httpx.post(
-                GEMINI_URL.format(model=model),
-                params={"key": settings.gemini_api_key},
-                json=body,
-                timeout=120,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                try:
-                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                except (KeyError, IndexError) as e:
-                    raise LLMError(f"gemini malformed response: {data}") from e
-            elif resp.status_code in (429, 404):
-                print(f"[gemini] model {model} failed with status {resp.status_code}, trying next model in pool...", file=sys.stderr)
-                last_err = LLMError(f"gemini {model} {resp.status_code}: {resp.text[:300]}")
-                continue
-            else:
+        for attempt in range(attempts):
+            try:
+                resp = httpx.post(
+                    GEMINI_URL.format(model=model),
+                    params={"key": settings.gemini_api_key},
+                    json=body,
+                    timeout=120,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    try:
+                        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    except (KeyError, IndexError) as e:
+                        raise LLMError(f"gemini malformed response: {data}") from e
+                if resp.status_code == 404:  # model not available -> next model, no wait
+                    last_err = LLMError(f"gemini {model} 404")
+                    break
+                if resp.status_code in (429, 500, 502, 503, 529):
+                    last_err = LLMError(f"gemini {model} {resp.status_code}: {resp.text[:200]}")
+                    if attempt + 1 < attempts:
+                        delay = min(settings.llm_backoff_base ** attempt, 4.0) + random.uniform(0, 0.5)
+                        time.sleep(delay)
+                    continue
                 raise LLMError(f"gemini {model} {resp.status_code}: {resp.text[:300]}")
-        except httpx.HTTPError as e:
-            print(f"[gemini] model {model} connection error: {e}, trying next...", file=sys.stderr)
-            last_err = LLMError(f"gemini {model} request failed: {e}")
-            continue
+            except httpx.HTTPError as e:
+                last_err = LLMError(f"gemini {model} request failed: {e}")
+                if attempt + 1 < attempts:
+                    time.sleep(1.0)
+                continue
 
     if last_err:
         raise last_err
@@ -100,7 +113,7 @@ def _groq(system: str, user: str, json_mode: bool = False) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.1,
+        "temperature": 0,
     }
     if json_mode:
         body["response_format"] = {"type": "json_object"}
@@ -150,7 +163,8 @@ def complete(system: str, user: str, images: Optional[list[bytes]] = None,
 
         if provider == "gemini" or images:
             try:
-                return _with_retry(_gemini, system, user, images, json_mode)
+                # _gemini already retries each model with backoff internally.
+                return _gemini(system, user, images, json_mode)
             except LLMError:
                 if images:
                     raise  # Groq can't see images

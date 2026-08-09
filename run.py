@@ -114,6 +114,19 @@ def process_scenario(sid: str, docs: list[Document], txs: list[Transaction],
             t.category = "other"
             t.related_party = False
 
+    # Apply in-force auditor reclassifications: move the named transaction into the
+    # category the auditor assigned for covenant purposes, and remember it as the
+    # decisive (evidence) line for the covenant its metric drives.
+    reclassifications = extract.extract_reclassifications([d for d in docs if d.kind == AUDIT])
+    reclassified: dict[str, str] = {}          # tx_id -> new category
+    for r in reclassifications:
+        for t in txs:
+            if (t.amount and abs(abs(t.amount) - r["amount"]) < 0.01
+                    and not decoy.is_decoy(t.counterparty, fake_brands)):
+                t.category = r["new_category"]
+                reclassified[t.tx_id] = r["new_category"]
+                break
+
     answers: list[CovenantAnswer] = []
     for clause in clauses:
         cov = cov_by_clause.get(clause)
@@ -122,6 +135,13 @@ def process_scenario(sid: str, docs: list[Document], txs: list[Transaction],
             continue
         verdict, actual = compute.evaluate(cov, txs)
         evidence = compute.find_evidence(cov, txs, verdict)
+        # A reclassified line is the auditor-defined decisive event for the covenant
+        # whose formula references that category — prefer it as evidence on a breach.
+        if verdict == Verdict.BREACH:
+            for txid, cat in reclassified.items():
+                if cat and cat in (cov.value_expr or ""):
+                    evidence = txid
+                    break
         answers.append(CovenantAnswer(
             scenario_id=sid, clause=clause, verdict=verdict, actual=actual,
             evidence_tx_id=evidence, threshold=cov.threshold, operator=cov.operator,

@@ -197,6 +197,54 @@ def reclassification_note(audit: Document | None) -> str:
     return "" if "не требовалось" in note else note
 
 
+# Russian category label used in an auditor reclassification -> internal primitive.
+_RECLASS_CATEGORY = {
+    "процентные расходы": "interest",
+    "коммунальные услуги": "utilities",
+    "страховые премии": "insurance",
+    "налоги": "tax",
+    "расходы на оплату труда": "payroll",
+    "капитальные затраты": "capex",
+    "арендные платежи": "rent",
+}
+
+
+def extract_reclassifications(audit_docs: list[Document]) -> list[dict]:
+    """Auditor reclassifications from IN-FORCE audit reports only.
+
+    Each in-force "Отчёт о выполнении согласованных процедур" states final
+    reclassifications ("Сумма ... переклассифицирована ... как <Категория>").
+    Superseded/draft copies carry decoy reclassifications and are ignored — the
+    ingest layer already flags them as `superseded`.
+    """
+    out: list[dict] = []
+    seen: set[tuple[float, str]] = set()
+    for d in audit_docs:
+        if d.superseded:
+            continue
+        text = " ".join(d.text.split())
+        for m in re.finditer(
+            r"Сумма в размере\s+\$([\d,]+\.\d{2})[,)]?\s*"
+            r"(?:выплаченная контрагенту\s+([^,]+?),)?"
+            r"[^.]*?переклассифицирована[^.]*?как\s+([А-Яа-яё ]+?)\.",
+            text,
+        ):
+            new_cat = _RECLASS_CATEGORY.get(m.group(3).strip().lower())
+            if not new_cat:
+                continue
+            amount = float(m.group(1).replace(",", ""))
+            key = (round(amount, 2), new_cat)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "amount": round(amount, 2),
+                "counterparty": (m.group(2) or "").strip(),
+                "new_category": new_cat,
+            })
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 4. Transaction classification
 # --------------------------------------------------------------------------- #
