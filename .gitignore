@@ -5,7 +5,6 @@ __pycache__/
 .DS_Store
 .idea/
 .pytest_cache/
-.claude
 agentic-bank-public
 
 # Datasets — keep out of git (may be large / provided by organizers)
