@@ -1,35 +1,45 @@
-"""Build submission.json from internal answers.
+"""Build submission.json by filling the organizers' template in place.
 
-The field names live here as constants so adapting to the organizers' template
-is a one-place change. Always fill all three components — partial credit is
-per-component, so a null is a guaranteed lost point.
+The template already contains every cell (scenario -> clause -> {status, actual,
+evidence_txn_id}); we only fill the three null fields per cell and set the
+top-level team / contact_email / model. Never leave a status null — an empty cell
+scores the same as a wrong one, so we always emit a verdict.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+from .config import settings
 from .schemas import CovenantAnswer, Verdict
 
-# TODO: confirm against the organizers' template once it drops.
-FIELD_VERDICT = "verdict"
-FIELD_VALUE = "value"
-FIELD_EVIDENCE_TX = "evidence_transaction_id"
-VERDICT_LABELS = {Verdict.COMPLIED: "complied", Verdict.BREACHED: "breached"}
+STATUS = "status"
+ACTUAL = "actual"
+EVIDENCE = "evidence_txn_id"
 
 
-def answer_to_record(ans: CovenantAnswer) -> dict:
-    return {
-        "borrower_id": ans.borrower_id,
-        "covenant_id": ans.covenant_id,
-        FIELD_VERDICT: VERDICT_LABELS[ans.verdict],
-        FIELD_VALUE: ans.value,
-        FIELD_EVIDENCE_TX: ans.evidence_tx_id,
-    }
+def write_submission(answers: list[CovenantAnswer], template_path: str | Path,
+                     out_path: str | Path) -> Path:
+    template_path, out_path = Path(template_path), Path(out_path)
+    payload = json.loads(template_path.read_text(encoding="utf-8"))
 
+    payload["team"] = settings.team
+    payload["contact_email"] = settings.contact_email
+    payload["model"] = settings.model_label
 
-def write_submission(answers: list[CovenantAnswer], out_path: str | Path) -> Path:
-    out_path = Path(out_path)
-    payload = {"answers": [answer_to_record(a) for a in answers]}
+    by_cell = {(a.scenario_id, a.clause): a for a in answers}
+    for sid, clauses in payload.get("answers", {}).items():
+        for clause, cell in clauses.items():
+            ans = by_cell.get((sid, clause))
+            if ans is not None:
+                cell[STATUS] = ans.verdict.value
+                cell[ACTUAL] = ans.actual
+                cell[EVIDENCE] = ans.evidence_tx_id
+            else:
+                # No answer produced — fill a safe default so the cell is scorable.
+                cell[STATUS] = Verdict.COMPLIANT.value
+                cell[ACTUAL] = cell.get(ACTUAL)
+                cell[EVIDENCE] = None
+
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return out_path

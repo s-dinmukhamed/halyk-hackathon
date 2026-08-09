@@ -9,12 +9,20 @@ from __future__ import annotations
 import base64
 import json
 import re
+import sys
+import threading
 import time
 from typing import Optional
 
 import httpx
 
 from .config import settings
+
+# Global throttle: at most 2 concurrent LLM calls, with a minimum gap of 1.5s.
+_llm_lock = threading.Semaphore(2)
+_llm_last_call: float = 0.0
+_llm_call_lock = threading.Lock()
+_LLM_MIN_GAP = 1.5  # seconds between calls to stay under free-tier RPM
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -47,19 +55,40 @@ def _gemini(system: str, user: str, images: Optional[list[bytes]] = None,
     if json_mode:
         body["generationConfig"]["responseMimeType"] = "application/json"
 
-    resp = httpx.post(
-        GEMINI_URL.format(model=settings.gemini_model),
-        params={"key": settings.gemini_api_key},
-        json=body,
-        timeout=120,
-    )
-    if resp.status_code != 200:
-        raise LLMError(f"gemini {resp.status_code}: {resp.text[:300]}")
-    data = resp.json()
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except (KeyError, IndexError) as e:
-        raise LLMError(f"gemini malformed response: {data}") from e
+    models_to_try = [settings.gemini_model]
+    for fallback in ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"]:
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
+
+    last_err = None
+    for model in models_to_try:
+        try:
+            resp = httpx.post(
+                GEMINI_URL.format(model=model),
+                params={"key": settings.gemini_api_key},
+                json=body,
+                timeout=120,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                try:
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                except (KeyError, IndexError) as e:
+                    raise LLMError(f"gemini malformed response: {data}") from e
+            elif resp.status_code in (429, 404):
+                print(f"[gemini] model {model} failed with status {resp.status_code}, trying next model in pool...", file=sys.stderr)
+                last_err = LLMError(f"gemini {model} {resp.status_code}: {resp.text[:300]}")
+                continue
+            else:
+                raise LLMError(f"gemini {model} {resp.status_code}: {resp.text[:300]}")
+        except httpx.HTTPError as e:
+            print(f"[gemini] model {model} connection error: {e}, trying next...", file=sys.stderr)
+            last_err = LLMError(f"gemini {model} request failed: {e}")
+            continue
+
+    if last_err:
+        raise last_err
+    raise LLMError("No Gemini models succeeded")
 
 
 def _groq(system: str, user: str, json_mode: bool = False) -> str:
@@ -108,21 +137,30 @@ def complete(system: str, user: str, images: Optional[list[bytes]] = None,
 
     Groq is text-only, so `images` force Gemini with no fallback.
     """
-    provider = settings.llm_provider.lower()
+    global _llm_last_call
+    # Rate-limit: at most 2 concurrent callers, min 1.5s between any two calls.
+    with _llm_lock:
+        with _llm_call_lock:
+            since = time.time() - _llm_last_call
+            if since < _LLM_MIN_GAP:
+                time.sleep(_LLM_MIN_GAP - since)
+            _llm_last_call = time.time()
 
-    if provider == "gemini" or images:
+        provider = settings.llm_provider.lower()
+
+        if provider == "gemini" or images:
+            try:
+                return _with_retry(_gemini, system, user, images, json_mode)
+            except LLMError:
+                if images:
+                    raise  # Groq can't see images
+                return _with_retry(_groq, system, user, json_mode)
+
+        # provider == "groq"
         try:
-            return _with_retry(_gemini, system, user, images, json_mode)
-        except LLMError:
-            if images:
-                raise  # Groq can't see images
             return _with_retry(_groq, system, user, json_mode)
-
-    # provider == "groq"
-    try:
-        return _with_retry(_groq, system, user, json_mode)
-    except LLMError:
-        return _with_retry(_gemini, system, user, None, json_mode)
+        except LLMError:
+            return _with_retry(_gemini, system, user, None, json_mode)
 
 
 def complete_json(system: str, user: str, images: Optional[list[bytes]] = None) -> dict | list:

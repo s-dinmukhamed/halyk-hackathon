@@ -1,13 +1,11 @@
 """Fail fast on a malformed submission.json before uploading it.
 
-A file that parses but has the wrong shape — missing components, nulls where the
-scorer wants a value, an unrecognised verdict label — loses points silently.
-This turns those into loud errors. Two checks: structural (keys, labels, all
-three components filled) and, when the organizers ship a sample, a key diff
-against their template.
+The scorer wants the exact template shape: top-level team/contact_email/model, then
+answers[scenario][clause] = {status, actual, evidence_txn_id}. A file that parses
+but drifts from that — a null status, a non-numeric actual, a renamed/missing cell —
+loses points silently. This turns those into loud errors.
 
-    python -m agent.validate submission.json
-    python -m agent.validate submission.json --template sample_submission.json
+    python -m agent.validate submission.json --template submission_template.json
 """
 from __future__ import annotations
 
@@ -16,17 +14,16 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .emit import FIELD_EVIDENCE_TX, FIELD_VALUE, FIELD_VERDICT, VERDICT_LABELS
+from .emit import ACTUAL, EVIDENCE, STATUS
 
-# The answers list may sit at the top level or under one of these wrapper keys.
-ANSWERS_KEYS = ("answers", "results", "submissions", "data")
-VALID_VERDICTS = {v for v in VERDICT_LABELS.values()}
+VALID_STATUS = {"COMPLIANT", "BREACH"}
+TOP_LEVEL = ("team", "contact_email", "model", "answers")
 
 
 @dataclass
 class Report:
-    errors: list[str] = field(default_factory=list)   # block upload
-    warnings: list[str] = field(default_factory=list)  # likely point loss
+    errors: list[str] = field(default_factory=list)    # block upload
+    warnings: list[str] = field(default_factory=list)   # likely point loss
     stats: dict = field(default_factory=dict)
 
     @property
@@ -42,7 +39,7 @@ class Report:
             lines.append(f"❌ {len(self.errors)} ERROR(S) — DO NOT UPLOAD:")
             lines += [f"   • {e}" for e in self.errors]
         if self.warnings:
-            lines.append(f"⚠️  {len(self.warnings)} WARNING(S) — likely lost points:")
+            lines.append(f"⚠️  {len(self.warnings)} WARNING(S):")
             lines += [f"   • {w}" for w in self.warnings]
         if self.ok and not self.warnings:
             lines.append("✅ CLEAN — safe to upload.")
@@ -52,94 +49,84 @@ class Report:
         return "\n".join(lines)
 
 
-def _find_answers(payload) -> tuple[list, str | None]:
-    """Locate the answers list regardless of wrapper key."""
-    if isinstance(payload, list):
-        return payload, None
-    if isinstance(payload, dict):
-        for key in ANSWERS_KEYS:
-            if isinstance(payload.get(key), list):
-                return payload[key], key
-    return [], None
-
-
-def validate_payload(payload) -> Report:
-    """Validate an already-parsed submission object."""
+def validate_payload(payload, template=None) -> Report:
     rep = Report()
-    answers, wrapper = _find_answers(payload)
-
-    if not answers:
-        rep.errors.append("no answers found (empty list or unexpected top-level shape)")
+    if not isinstance(payload, dict):
+        rep.errors.append("top level is not a JSON object")
         return rep
 
-    rep.stats["answers"] = len(answers)
-    rep.stats["wrapper_key"] = wrapper or "(top-level list)"
+    for key in ("team", "contact_email", "model"):
+        if not payload.get(key):
+            rep.warnings.append(f"top-level '{key}' is empty")
 
-    seen: set[tuple] = set()
-    borrowers: set = set()
-    verdict_counts: dict[str, int] = {}
-    missing_value = missing_tx_on_breach = 0
+    answers = payload.get("answers")
+    if not isinstance(answers, dict) or not answers:
+        rep.errors.append("'answers' missing or empty")
+        return rep
 
-    for i, a in enumerate(answers):
-        loc = f"answer[{i}]"
-        if not isinstance(a, dict):
-            rep.errors.append(f"{loc}: not an object")
+    cells = status_counts = 0
+    breaches = breaches_with_evidence = null_actual = 0
+    for sid, clauses in answers.items():
+        if not isinstance(clauses, dict):
+            rep.errors.append(f"answers[{sid}] is not an object")
             continue
+        for clause, cell in clauses.items():
+            cells += 1
+            loc = f"{sid}.{clause}"
+            if not isinstance(cell, dict):
+                rep.errors.append(f"{loc}: cell is not an object")
+                continue
+            for k in (STATUS, ACTUAL, EVIDENCE):
+                if k not in cell:
+                    rep.errors.append(f"{loc}: missing key '{k}'")
 
-        bid = a.get("borrower_id")
-        cid = a.get("covenant_id")
-        if not bid:
-            rep.errors.append(f"{loc}: missing borrower_id")
-        if not cid:
-            rep.errors.append(f"{loc}: missing covenant_id")
-        if bid:
-            borrowers.add(bid)
+            status = cell.get(STATUS)
+            if status not in VALID_STATUS:
+                rep.errors.append(f"{loc}: status {status!r} not in {sorted(VALID_STATUS)}")
+            else:
+                status_counts += 1
+                if status == "BREACH":
+                    breaches += 1
+                    if cell.get(EVIDENCE):
+                        breaches_with_evidence += 1
 
-        dup = (bid, cid)
-        if dup in seen:
-            rep.warnings.append(f"{loc}: duplicate (borrower={bid}, covenant={cid})")
-        seen.add(dup)
+            actual = cell.get(ACTUAL)
+            if not isinstance(actual, (int, float)):
+                rep.errors.append(f"{loc}: actual {actual!r} is not a number")
+                null_actual += 1
+            elif actual < 0:
+                rep.warnings.append(f"{loc}: actual {actual} is negative (must be positive)")
 
-        # Component 1 — verdict.
-        verdict = a.get(FIELD_VERDICT)
-        if verdict is None:
-            rep.errors.append(f"{loc}: missing '{FIELD_VERDICT}'")
-        elif verdict not in VALID_VERDICTS:
-            rep.warnings.append(
-                f"{loc}: verdict '{verdict}' not in {sorted(VALID_VERDICTS)} "
-                "(scorer may not recognise it)"
-            )
-        else:
-            verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+    rep.stats.update({
+        "scenarios": len(answers),
+        "cells": cells,
+        "valid_status": status_counts,
+        "breaches": breaches,
+        "breaches_with_evidence": breaches_with_evidence,
+        "non_numeric_actual": null_actual,
+    })
 
-        # Component 2 — number. Null means a guaranteed lost component.
-        if FIELD_VALUE not in a:
-            rep.errors.append(f"{loc}: missing '{FIELD_VALUE}' key")
-        elif a.get(FIELD_VALUE) is None:
-            missing_value += 1
-
-        # Component 3 — evidence transaction (only meaningful for breaches).
-        if FIELD_EVIDENCE_TX not in a:
-            rep.errors.append(f"{loc}: missing '{FIELD_EVIDENCE_TX}' key")
-        if str(verdict).lower() == "breached" and not a.get(FIELD_EVIDENCE_TX):
-            missing_tx_on_breach += 1
-
-    rep.stats["distinct_borrowers"] = len(borrowers)
-    rep.stats["verdicts"] = verdict_counts or "—"
-    if missing_value:
-        rep.warnings.append(
-            f"{missing_value} answer(s) have null {FIELD_VALUE} → that component scores 0"
-        )
-    if missing_tx_on_breach:
-        rep.warnings.append(
-            f"{missing_tx_on_breach} breach(es) lack an evidence transaction id "
-            "→ evidence component scores 0"
-        )
+    if template is not None:
+        _check_template(rep, answers, template)
     return rep
 
 
+def _check_template(rep: Report, answers: dict, template: dict) -> None:
+    """Every template cell must be present, with no added/renamed keys."""
+    t_answers = template.get("answers", {})
+    for sid, clauses in t_answers.items():
+        if sid not in answers:
+            rep.errors.append(f"missing scenario {sid}")
+            continue
+        for clause in clauses:
+            if clause not in answers[sid]:
+                rep.errors.append(f"missing cell {sid}.{clause}")
+    extra = set(answers) - set(t_answers)
+    if extra:
+        rep.warnings.append(f"scenarios not in template: {sorted(extra)}")
+
+
 def validate_file(path: str | Path, template: str | Path | None = None) -> Report:
-    """Load submission.json (and optional template) and validate."""
     path = Path(path)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -148,36 +135,13 @@ def validate_file(path: str | Path, template: str | Path | None = None) -> Repor
     except json.JSONDecodeError as e:
         return Report(errors=[f"not valid JSON: {e}"])
 
-    rep = validate_payload(payload)
+    tmpl = None
     if template:
-        rep = _check_against_template(rep, payload, Path(template))
-    return rep
-
-
-def _check_against_template(rep: Report, payload, template_path: Path) -> Report:
-    """Diff our output's answer keys against the organizers' sample template."""
-    try:
-        tmpl = json.loads(template_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        rep.warnings.append(f"could not read template {template_path}: {e}")
-        return rep
-
-    ours, _ = _find_answers(payload)
-    theirs, _ = _find_answers(tmpl)
-    if not ours or not theirs:
-        rep.warnings.append("template check skipped (empty answers on one side)")
-        return rep
-
-    our_keys = set(ours[0]) if isinstance(ours[0], dict) else set()
-    their_keys = set(theirs[0]) if isinstance(theirs[0], dict) else set()
-    missing = their_keys - our_keys
-    extra = our_keys - their_keys
-    if missing:
-        rep.errors.append(f"template requires keys we don't emit: {sorted(missing)}")
-    if extra:
-        rep.warnings.append(f"we emit keys not in template (ignored by scorer?): {sorted(extra)}")
-    rep.stats["template_keys"] = sorted(their_keys)
-    return rep
+        try:
+            tmpl = json.loads(Path(template).read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            return Report(errors=[f"could not read template {template}: {e}"])
+    return validate_payload(payload, tmpl)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Validate a Halyk submission.json")
     ap.add_argument("path", type=Path, help="submission.json to validate")
     ap.add_argument("--template", type=Path, default=None,
-                    help="organizers' sample submission to diff keys against")
+                    help="submission_template.json to check cells against")
     args = ap.parse_args(argv)
 
     rep = validate_file(args.path, args.template)

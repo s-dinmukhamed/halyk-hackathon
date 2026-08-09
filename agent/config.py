@@ -22,8 +22,16 @@ class Settings(BaseSettings):
     llm_max_retries: int = 5
     llm_backoff_base: float = 2.0
 
-    # Kept modest so concurrent LLM calls don't trip free-tier rate limits.
-    max_workers: int = 4
+    # Sequential processing to respect free-tier RPM limits on Gemini.
+    max_workers: int = 1
+
+    # Submission metadata (top-level fields the scorer requires).
+    team: str = "id"
+    contact_email: str = "dimahssydykov@gmail.com"
+    model_label: str = "gemini-2.0-flash"
+
+    # FX: covenant limits are in USD; a few ledger rows are EUR.
+    eur_usd_rate: float = 1.08
 
 
 settings = Settings()
